@@ -1,0 +1,28 @@
+VERSION "local test database"
+
+NS_ :
+  NS_DESC_ CM_ BA_DEF_ BA_ VAL_ CAT_DEF_ ;
+
+BS_:
+
+BU_: Gateway ECM BCM
+
+BO_ 256 EngineData: 8 ECM
+ SG_ EngineSpeed : 0|16@1+ (0.25,0) [0|16383.75] "rpm" Gateway
+ SG_ EngineTemp : 16|8@1- (1,-40) [-40|215] "degC" Gateway
+ SG_ Counter : 24|4@1+ (1,0) [0|15] "" Gateway
+
+BO_ 257 BodyStatus: 8 BCM
+ SG_ VehicleSpeed : 7|16@0+ (0.01,0) [0|655.35] "km/h" Gateway
+ SG_ GearLever : 23|4@0+ (1,0) [0|7] "" Gateway
+ SG_ DoorMask : 32|8@1+ (1,0) [0|255] "" Gateway
+
+BO_ 258 MuxStatus: 8 ECM
+ SG_ StatusType M : 0|4@1+ (1,0) [0|3] "" Gateway
+ SG_ CommonVoltage : 8|8@1+ (0.1,0) [0|25.5] "V" Gateway
+ SG_ OilPressure m0 : 16|8@1+ (1,0) [0|255] "kPa" Gateway
+ SG_ OilTemp m0 : 24|8@1- (1,-40) [-40|215] "degC" Gateway
+ SG_ FuelLevel m1 : 16|8@1+ (0.5,0) [0|127.5] "%" Gateway
+ SG_ ReservedCode m2 : 16|8@1+ (1,0) [0|255] "" Gateway
+
+VAL_ 258 StatusType 0 "Oil" 1 "Fuel" 2 "Reserved" ;
