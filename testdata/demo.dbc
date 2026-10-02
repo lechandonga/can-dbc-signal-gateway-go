@@ -1,0 +1,28 @@
+VERSION "demo subset for local replay"
+
+NS_ :
+
+BS_:
+
+BU_: ECU_GW ECU_ENG ECU_BODY
+
+BO_ 256 ENGINE_DATA: 8 ECU_ENG
+ SG_ EngineSpeed : 0|16@1+ (0.25,0) [0,16383.75] "rpm" ECU_GW
+ SG_ EngineTemp : 16|8@1+ (1,-40) [-40,215] "degC" ECU_GW
+ SG_ RequestTorque : 24|16@1- (0.1,0) [-100,100] "Nm" ECU_GW
+ SG_ Counter : 40|4@1+ (1,0) [0,15] "" ECU_GW
+
+BO_ 257 BODY_STATUS: 8 ECU_BODY
+ SG_ StatusType M : 0|4@1+ (1,0) [0,15] "" ECU_GW
+ SG_ DoorOpenDeg m0 : 8|8@1+ (1,0) [0,180] "deg" ECU_GW
+ SG_ WindowPos m0 : 16|8@1+ (1,0) [0,100] "%" ECU_GW
+ SG_ GearEngaged m1 : 7|4@0+ (1,0) [0,15] "" ECU_GW
+ SG_ GearLeverPos m1 : 23|8@0+ (1,0) [0,255] "" ECU_GW
+
+BO_ 258 DIAG_PLAIN: 3 ECU_GW
+ SG_ DiagWordMoto : 7|16@0+ (1,0) [0,65535] "" ECU_GW
+ SG_ DiagByte : 16|8@1+ (1,0) [0,255] "" ECU_GW
+
+CM_ BO_ 256 "engine periodic frame";
+CM_ SG_ 256 EngineSpeed "crankshaft speed";
+VAL_ 257 GearEngaged 0 "P" 1 "R" 2 "N" 3 "D";
