@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/lechandonga/can-dbc-signal-gateway-go/internal/canbus"
+	"github.com/lechandonga/can-dbc-signal-gateway-go/internal/dbc"
 	"github.com/lechandonga/can-dbc-signal-gateway-go/internal/model"
 )
 
@@ -12,7 +13,10 @@ import (
 func (g *Gateway) HandleFrame(f canbus.Frame) (*Result, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.handleFrameLocked(f)
+}
 
+func (g *Gateway) handleFrameLocked(f canbus.Frame) (*Result, error) {
 	g.total++
 	msg := g.db.Messages[f.ID]
 	if msg == nil {
@@ -91,6 +95,7 @@ func (g *Gateway) HandleFrame(f canbus.Frame) (*Result, error) {
 	res := &Result{Frame: f, MsgID: msg.ID, MsgName: msg.Name, MuxValue: muxValue}
 	for _, sig := range active {
 		raw := canbus.ExtractRaw(sig, f.Data)
+		label, hasLabel := dbc.LabelFor(sig, raw)
 		st := &model.State{
 			MessageID:   msg.ID,
 			MessageName: msg.Name,
@@ -100,6 +105,8 @@ func (g *Gateway) HandleFrame(f canbus.Frame) (*Result, error) {
 			Unit:        sig.Unit,
 			UpdatedAt:   f.Timestamp,
 			ReceivedAt:  f.Timestamp,
+			Label:       label,
+			HasLabel:    hasLabel,
 		}
 		if sig.MuxSwitch != nil {
 			v := *muxValue
@@ -109,6 +116,7 @@ func (g *Gateway) HandleFrame(f canbus.Frame) (*Result, error) {
 		res.Updated = append(res.Updated, *st)
 	}
 	g.lastTS[msg.ID] = f.Timestamp
+	g.lastData[msg.ID] = append([]byte(nil), f.Data...)
 	g.ok++
 	return res, nil
 }

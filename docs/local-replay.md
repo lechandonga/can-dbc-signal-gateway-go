@@ -1,56 +1,89 @@
 # 本地复现指南
 
-无需真实 CAN 硬件或任何外部服务：定义来自本地 DBC 文件，帧由脚本本地生成。
+所有验证都使用本地 DBC、本地构造帧和调用方显式时间戳，不接真实硬件或外部服务。
 
-## 运行演示
+## 运行
 
 ```bash
 go run ./cmd/demo
-```
-
-演示内置一份 DBC 和一条确定性帧序列，覆盖：正常帧、两种复用布局、非法复用选择值、
-截断帧、长度不符帧、未知报文帧、时间戳回退帧、按信号超时与恢复，末尾打印各信号判定与统计。
-
-## 运行测试（含竞态检测）
-
-```bash
+go test ./...
 CGO_ENABLED=1 go test -race ./...
-# 查看覆盖了哪些业务/输入/判定依据（每条用例均有结构化日志）：
 CGO_ENABLED=1 go test -race ./... -v
 ```
 
 测试日志统一形如：
 
-```
+```text
 [biz=<业务域>][input=<输入标识>] <判定依据与实际值>
 ```
 
-业务域包括：`malformed-definition`、`error-location`、`valid-definition`、
-`decode-endian-signed`、`multiplex`、`multiplex-illegal`、`reject-unknown`、
-`reject-length`、`reject-truncated`、`no-pollution`、`timeout-occluded`、
-`timeout`、`recovery`、`never-received`、`timestamp-order`、
-`reload-fail`、`reload-ok`、`concurrent-race`、`roundtrip`、`simulator`。
+业务域覆盖真实 DBC 等价写法、混排字节序边界、数值表与回退、导入摘要、
+解码、注入往返与保持、注入拒绝分类、复用失效/不激活、多路隔离、并发和规模定义。
 
-## 自定义 DBC 与帧序列
+## 造一份 DBC
 
-1. 参照 `testdata/demo.dbc` 编写 DBC（支持子集见 `docs/dbc-subset.md`）。
-2. 用 `dbc.Parse` 解析得到不可变 `*model.Database`。
-3. 用 `cansim.NewBuilder(db)` 按物理量构造帧（自动处理字节序/符号/缩放/复用选择值）；
-   用 `cansim.Truncate(frame, n)`、`cansim.WithID(frame, id)` 构造异常帧。
-4. 用 `cansim.NewSequence(t0).Add(offset, id, data)...` 编写带时间戳的脚本，
-   `Replay()` 多次重放结果完全一致。
-5. 创建 `gateway.New(db, cfg)`，逐帧 `HandleFrame`，用显式 `now` 调用
-   `GetSignal` / `Snapshot` 判定；`Reload(reader)` 热加载新定义。
+最小定义：
 
-最小骨架：
+```dbc
+VERSION "local"
+
+NS_ :
+
+BS_:
+BU_: GW SENSOR
+
+BO_ 100 SENSOR_DATA: 8 SENSOR
+ SG_ Speed : 0|16@1+ (0.25,0) [0,1000] "rpm" GW
+ SG_ Mode M : 16|2@1+ (1,0) [0,2] "" GW
+ SG_ Door m0 : 24|8@1+ (1,0) [0,100] "%" GW
+ SG_ Gear m1 : 31|4@0+ (1,0) [0,3] "" GW
+
+VAL_TABLE_ GearTable 0 "P" 1 "R" 2 "N" 3 "D";
+VAL_ 100 Gear GearTable;
+```
+
+导入并检查摘要：
 
 ```go
-db, _ := dbc.Parse(dbcFile)                       // 失败 -> dbc.ErrorList（逐条原因）
-gw := gateway.New(db, gateway.Config{DefaultTimeout: 100 * time.Millisecond})
-builder := cansim.NewBuilder(db)
-f, _ := builder.Frame(256, nil, map[string]float64{"EngineSpeed": 800})
-f.Timestamp = t0
-res, err := gw.HandleFrame(f)                    // err 为 *canbus.DecodeError 时帧被拒绝
-view, ok := gw.GetSignal(256, "EngineSpeed", t0.Add(150*time.Millisecond))
-// view.Status: OK / TIMEOUT / NEVER_RECEIVED
+db, summary, err := dbc.ParseDetailed(file)
+// summary.AdoptedMessages / Ignored / Rejected
 ```
+
+## 造帧和注入
+
+脚本造帧：
+
+```go
+b := cansim.NewBuilder(db)
+frame, _ := b.Frame(100, ptr(1), map[string]float64{"Gear": 3})
+frame.Timestamp = t0
+res, err := gw.HandleFrame(frame)
+```
+
+按信号注入：
+
+```go
+res, err := gw.Inject(gateway.Injection{
+    MessageID: 100,
+    Values:    map[string]float64{"Mode": 1, "Gear": 3},
+    Timestamp: t0,
+})
+view, ok := gw.GetSignal(100, "Gear", t0)
+// view.State.Raw、view.State.Value、view.State.Label / HasLabel
+```
+
+再次只注入 `Mode=0, Door=50` 时，`Gear` 查询状态会变成 `INACTIVE`，不是 `TIMEOUT`。
+
+## 多路总线
+
+```go
+registry := gateway.NewBusRegistry()
+registry.AddBus("powertrain", dbA, gateway.Config{DefaultTimeout: 100 * time.Millisecond})
+registry.AddBus("body", dbB, gateway.Config{DefaultTimeout: 200 * time.Millisecond})
+bus, _ := registry.Get("powertrain")
+bus.Inject(...)
+all := registry.SnapshotAll(now)
+```
+
+未知总线名通过 `MustGet` 返回 `UNKNOWN_BUS`；单路场景仍可直接使用 `gateway.New(db, cfg)`，
+不需要经过 `BusRegistry`。

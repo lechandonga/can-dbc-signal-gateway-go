@@ -15,46 +15,88 @@ import (
 )
 
 var (
-	versionRe = regexp.MustCompile(`^VERSION\s+"(.*)"\s*$`)
+	versionRe = regexp.MustCompile(`^VERSION\s+"(.*)"\s*;?\s*$`)
 	boRe      = regexp.MustCompile(`^BO_\s+(\d+)\s+([A-Za-z_][A-Za-z0-9_]*):\s+(\d+)\s+(\S+)\s*$`)
-	sgRe      = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)(?:\s+(M|m\d+M?))?\s*:\s+(\d+)\|(\d+)@([01])([+-])\s+\(([^,]*),([^)]*)\)\s+\[([^,]*),([^\]]*)\]\s+"([^"]*)"\s+(.+)$`)
+	sgRe      = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)(?:\s+(M|m\d+M?))?\s*:\s+(\d+)\|(\d+)@([01])([+-])\s+\(([^,]*),([^)]*)\)\s+\[([^,]*),([^\]]*)\]\s+"([^"]*)"(?:\s+(.+))?$`)
 	muxSimple = regexp.MustCompile(`^m(\d+)$`)
 	muxBoth   = regexp.MustCompile(`^m(\d+)M$`)
 )
 
-// Parse 解析 DBC 内容，成功返回不可变的 model.Database。
-// 失败时返回 ErrorList，包含全部逐条错误（含行号与报文/信号定位）。
-func Parse(r io.Reader) (*model.Database, error) {
+// ParseDetailed 解析 DBC 并返回定义与导入摘要。
+func ParseDetailed(r io.Reader) (*model.Database, *ImportSummary, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
-		return nil, ErrorList{{Reason: ReasonSyntax, Message: err.Error()}}
+		sum := &ImportSummary{Rejected: []*DefError{{Reason: ReasonSyntax, Message: err.Error()}}}
+		return nil, sum, ErrorList(sum.Rejected)
 	}
-	p := &parser{
-		msgs:       map[uint32]*model.Message{},
-		names:      map[string]uint32{},
-		sigValType: map[uint32]map[string]int{},
-	}
+	p := newParser()
 	p.parseLines(strings.Split(string(data), "\n"))
+	p.resolveValueReferences()
 	if len(p.errors) == 0 {
 		p.validate()
 	}
-	if len(p.errors) > 0 {
-		return nil, ErrorList(p.errors)
-	}
-	if len(p.msgs) == 0 {
+	if len(p.msgs) == 0 && len(p.errors) == 0 {
 		p.errf(0, ReasonIncomplete, "DBC defines no messages")
-		return nil, ErrorList(p.errors)
 	}
-	return &model.Database{Messages: p.msgs, Names: p.names}, nil
+	sum := p.summary()
+	if len(p.errors) > 0 {
+		sum.Rejected = append([]*DefError(nil), p.errors...)
+		return nil, sum, ErrorList(p.errors)
+	}
+	db := &model.Database{Messages: p.msgs, Names: p.names, ValueTables: p.valueTables}
+	sum.Rejected = []*DefError{}
+	return db, sum, nil
+}
+
+// Parse 解析 DBC 内容，保持原有单返回值入口。
+func Parse(r io.Reader) (*model.Database, error) {
+	db, _, err := ParseDetailed(r)
+	return db, err
 }
 
 type parser struct {
-	msgs       map[uint32]*model.Message
-	names      map[string]uint32
-	errors     []*DefError
-	current    *model.Message
-	inNS       bool
-	sigValType map[uint32]map[string]int
+	msgs        map[uint32]*model.Message
+	names       map[string]uint32
+	errors      []*DefError
+	current     *model.Message
+	inNS        bool
+	valueTables map[string]map[uint64]string
+	pendingVAL  []pendingVAL
+	ignored     map[string]*ignoredGroup
+}
+
+type pendingVAL struct {
+	line      int
+	msg       *model.Message
+	signal    string
+	entries   map[uint64]string
+	tableName string
+}
+
+type ignoredGroup struct {
+	kind      string
+	firstLine int
+	lastLine  int
+	count     int
+}
+
+func newParser() *parser {
+	return &parser{
+		msgs:        map[uint32]*model.Message{},
+		names:       map[string]uint32{},
+		valueTables: map[string]map[uint64]string{},
+		ignored:     map[string]*ignoredGroup{},
+	}
+}
+
+func (p *parser) noteIgnored(line int, kind string) {
+	g := p.ignored[kind]
+	if g == nil {
+		g = &ignoredGroup{kind: kind, firstLine: line, lastLine: line}
+		p.ignored[kind] = g
+	}
+	g.lastLine = line
+	g.count++
 }
 
 func (p *parser) errf(line int, reason Reason, msg string, args ...any) {
@@ -140,7 +182,14 @@ func statementComplete(s string) bool {
 func (p *parser) parseStatement(lineNo int, s string) {
 	switch {
 	case strings.HasPrefix(s, "VERSION"):
-		if !versionRe.MatchString(s) {
+		end := strings.Index(s[len("VERSION"):], `"`)
+		versionText := s
+		if end >= 0 {
+			if close := strings.Index(s[len("VERSION")+end+1:], `"`); close >= 0 {
+				versionText = s[:len("VERSION")+end+1+close+1]
+			}
+		}
+		if !versionRe.MatchString(versionText) {
 			p.errf(lineNo, ReasonSyntax, `malformed VERSION statement (expect VERSION "...")`)
 		}
 	case s == "NS_ :":
@@ -166,29 +215,33 @@ func (p *parser) parseStatement(lineNo int, s string) {
 		p.parseSG(lineNo, strings.TrimSpace(strings.TrimPrefix(s, "SG_")))
 	case strings.HasPrefix(s, "CM_"):
 		p.parseCM(lineNo, strings.TrimSuffix(s, ";"))
+	case strings.HasPrefix(s, "VAL_TABLE_"):
+		p.parseVALTable(lineNo, strings.TrimSuffix(s, ";"))
 	case strings.HasPrefix(s, "VAL_ "):
-		p.parseVAL(lineNo, strings.TrimSuffix(s, ";"))
+		p.parseValueBinding(lineNo, strings.TrimSuffix(s, ";"))
 	case strings.HasPrefix(s, "SIG_VALTYPE_"):
 		p.parseSigValType(lineNo, strings.TrimSuffix(s, ";"))
-	case isKnownPassThrough(s):
-		// 已知但本子集不使用内容的语句：容忍。
+	case knownPassThrough(s) != "":
+		p.noteIgnored(lineNo, knownPassThrough(s))
 	default:
 		p.errf(lineNo, ReasonUnknownStatement, "unsupported or malformed statement: %q", truncate(s, 80))
 	}
 }
 
-func isKnownPassThrough(s string) bool {
+func knownPassThrough(s string) string {
 	prefixes := []string{
-		"SIG_GROUP_", "BA_ ", "BA_DEF_", "VAL_TABLE_", "BO_TX_BU_", "EV_ ",
-		"ENVVAR_DATA_", "SGT_REL_", "SIG_TYPE_REF_", "BA_DEF_REL_", "BA_REL_",
-		"CAT_DEF_", "CAT_", "FILTER", "NS_DESC_",
+		"SIG_GROUP_", "BA_ ", "BA_DEF_", "BA_DEF_DEF_", "BA_DEF_SGTYPE_",
+		"BA_SGTYPE_", "BO_TX_BU_", "EV_ ", "ENVVAR_DATA_", "SGT_REL_",
+		"SIG_TYPE_REF_", "SGTYPE_", "SGTYPE_VAL_", "BA_DEF_REL_", "BA_REL_",
+		"BA_DEF_DEF_REL_", "BU_SG_REL_", "BU_EV_REL_", "BU_BO_REL_",
+		"CAT_DEF_", "CAT_", "FILTER", "NS_DESC_", "VALTAB_DEF_",
 	}
 	for _, pre := range prefixes {
 		if strings.HasPrefix(s, pre) {
-			return true
+			return strings.Fields(pre)[0]
 		}
 	}
-	return false
+	return ""
 }
 
 func truncate(s string, n int) string {

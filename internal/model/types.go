@@ -25,20 +25,21 @@ func (b ByteOrder) String() string {
 
 // Signal 描述单个信号定义。
 type Signal struct {
-	Line      int // DBC 中 SG_ 所在行（1 基）
-	Name      string
-	IsSigned  bool
-	Order     ByteOrder
-	StartBit  int // DBC 起始位（Intel=LSB，Motorola=MSB）
-	Length    int // 位长
-	Factor    float64
-	Offset    float64
-	Unit      string
-	Min       float64
-	Max       float64
-	MuxSwitch *int // 复用选择值：nil 表示普通信号；MuxIndex==-1 表示复用器
-	MuxIndex  int
-	Receivers []string
+	Line        int // DBC 中 SG_ 所在行（1 基）
+	Name        string
+	IsSigned    bool
+	Order       ByteOrder
+	StartBit    int // DBC 起始位（Intel=LSB，Motorola=MSB）
+	Length      int // 位长
+	Factor      float64
+	Offset      float64
+	Unit        string
+	Min         float64
+	Max         float64
+	MuxSwitch   *int // 复用选择值：nil 表示普通信号；MuxIndex==-1 表示复用器
+	MuxIndex    int
+	Receivers   []string
+	ValueLabels map[uint64]string
 }
 
 // IsMuxMultiplexor 判断该信号是否为多路复用器。
@@ -87,8 +88,9 @@ func (m *Message) ensureIndex() {
 // Database 为一份完整、已校验的 DBC 定义快照。
 // Parse 成功返回的 Database 不可变，可被多个 goroutine 并发只读使用。
 type Database struct {
-	Messages map[uint32]*Message
-	Names    map[string]uint32 // 报文名 -> ID
+	Messages    map[uint32]*Message
+	Names       map[string]uint32 // 报文名 -> ID
+	ValueTables map[string]map[uint64]string
 }
 
 // State 为单个信号的运行时状态快照。
@@ -102,6 +104,8 @@ type State struct {
 	UpdatedAt   time.Time
 	ReceivedAt  time.Time
 	MuxValue    *int // 本次取值时的复用器选择值（普通信号为 nil）
+	Label       string
+	HasLabel    bool
 }
 
 // Status 为信号查询结论。
@@ -114,6 +118,8 @@ const (
 	StatusTimeout
 	// StatusNeverReceived 定义已加载但从未收到包含该信号的帧。
 	StatusNeverReceived
+	// StatusInactive 信号属于复用报文的非当前选择分支。
+	StatusInactive
 )
 
 func (s Status) String() string {
@@ -124,6 +130,8 @@ func (s Status) String() string {
 		return "TIMEOUT"
 	case StatusNeverReceived:
 		return "NEVER_RECEIVED"
+	case StatusInactive:
+		return "INACTIVE"
 	default:
 		return "UNKNOWN"
 	}

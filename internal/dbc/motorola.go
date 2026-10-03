@@ -5,8 +5,6 @@ package dbc
 //
 // sawtooth 行号（DBC 起始位即 MSB 行号）映射到线性位：
 //
-//	linear = 8*floor(pos/8) + (7 - pos mod 8)
-//
 // 每走一位：处于行首（pos%8==0）时下跳一行（pos+=15），否则左移（pos--）。
 // 调用前应通过 MotorolaLayoutOK 校验，否则返回的位可能覆盖错误字节。
 func MotorolaBits(start, length int) []int {
@@ -20,7 +18,7 @@ func MotorolaBits(start, length int) []int {
 				pos--
 			}
 		}
-		bits = append(bits, 8*(pos/8)+(7-pos%8))
+		bits = append(bits, pos)
 	}
 	return bits
 }

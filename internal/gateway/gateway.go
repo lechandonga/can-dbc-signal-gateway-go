@@ -49,12 +49,14 @@ type Stats struct {
 
 // Gateway 为组件入口。
 type Gateway struct {
-	cfg Config
+	name string
+	cfg  Config
 
 	mu        sync.RWMutex
 	db        *model.Database
 	states    map[uint32]map[string]*model.State
 	lastTS    map[uint32]time.Time
+	lastData  map[uint32][]byte
 	total     int64
 	ok        int64
 	rejected  int64
@@ -69,28 +71,42 @@ func New(db *model.Database, cfg Config) *Gateway {
 	if cfg.SignalTimeouts == nil {
 		cfg.SignalTimeouts = map[string]time.Duration{}
 	}
-	return &Gateway{
+	g := &Gateway{
 		cfg:       cfg,
 		db:        db,
 		states:    map[uint32]map[string]*model.State{},
 		lastTS:    map[uint32]time.Time{},
+		lastData:  map[uint32][]byte{},
 		reasonCnt: map[canbus.DecodeReason]int64{},
 	}
+	return g
 }
+
+func (g *Gateway) setName(name string) { g.name = name }
+
+// Name 返回网关所属总线名；单路直接创建时为空字符串。
+func (g *Gateway) Name() string { return g.name }
 
 // Reload 从 reader 解析新定义：解析/校验失败时整体拒绝，旧定义与状态继续可用；
 // 成功时原子替换定义并清空运行时状态（旧定义下的历史值不属于新定义，避免新旧混用）。
 func (g *Gateway) Reload(r io.Reader) error {
-	newDB, err := dbc.Parse(r)
+	_, err := g.ReloadDetailed(r)
+	return err
+}
+
+// ReloadDetailed 与 Reload 相同，但返回新定义的导入摘要。
+func (g *Gateway) ReloadDetailed(r io.Reader) (*dbc.ImportSummary, error) {
+	newDB, summary, err := dbc.ParseDetailed(r)
 	if err != nil {
-		return err
+		return summary, err
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.db = newDB
 	g.states = map[uint32]map[string]*model.State{}
 	g.lastTS = map[uint32]time.Time{}
-	return nil
+	g.lastData = map[uint32][]byte{}
+	return summary, nil
 }
 
 // ReloadDB 原子替换为外部已解析成功的定义（语义与 Reload 相同）。
@@ -100,6 +116,7 @@ func (g *Gateway) ReloadDB(newDB *model.Database) {
 	g.db = newDB
 	g.states = map[uint32]map[string]*model.State{}
 	g.lastTS = map[uint32]time.Time{}
+	g.lastData = map[uint32][]byte{}
 }
 
 // DB 返回当前定义快照（不可变，可安全读取）。

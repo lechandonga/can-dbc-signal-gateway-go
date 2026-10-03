@@ -6,6 +6,33 @@ import (
 	"github.com/lechandonga/can-dbc-signal-gateway-go/internal/model"
 )
 
+// SignalBitPositions 返回信号占用的线性 CAN 位号。
+func SignalBitPositions(sig *model.Signal) ([]int, bool) {
+	switch sig.Order {
+	case model.Intel:
+		bits := make([]int, sig.Length)
+		for i := 0; i < sig.Length; i++ {
+			bits[i] = sig.StartBit + i
+		}
+		return bits, true
+	case model.Motorola:
+		pos := sig.StartBit
+		bits := make([]int, sig.Length)
+		for i := 0; i < sig.Length; i++ {
+			if i > 0 {
+				if pos%8 == 0 {
+					pos += 15
+				} else {
+					pos--
+				}
+			}
+			bits[i] = pos
+		}
+		return bits, true
+	}
+	return nil, false
+}
+
 // ExtractRaw 按定义从数据中取出无符号原始值（MSB->LSB 线性位序与 dbc.linearBits 一致）。
 // 调用方需保证数据长度足够，否则访问越界由上层校验拦截。
 func ExtractRaw(sig *model.Signal, data []byte) uint64 {

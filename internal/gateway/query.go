@@ -54,12 +54,40 @@ func (g *Gateway) GetSignal(msgID uint32, sigName string, now time.Time) (Signal
 	if _, ok := msg.SignalByName(sigName); !ok {
 		return SignalView{}, false
 	}
+	st := g.states[msgID][sigName]
 	view := SignalView{}
-	if st := g.states[msgID][sigName]; st != nil {
+	if st != nil {
 		view.State = *st
 	}
-	view.Status, view.Reason = classify(g.states[msgID][sigName], g.timeoutFor(msg.Name, sigName), now)
+	if inactiveFor(g.states[msgID], msg, sigName, st) {
+		view.Status = model.StatusInactive
+		view.Reason = "signal belongs to a multiplex layout that is not currently selected"
+	} else {
+		view.Status, view.Reason = classify(st, g.timeoutFor(msg.Name, sigName), now)
+	}
 	return view, true
+}
+
+func inactiveFor(bucket map[string]*model.State, msg *model.Message, signalName string, _ *model.State) bool {
+	sig, ok := msg.SignalByName(signalName)
+	if !ok || sig.MuxSwitch == nil {
+		return false
+	}
+	var muxSig *model.Signal
+	for _, candidate := range msg.Signals {
+		if candidate.IsMuxMultiplexor() {
+			muxSig = candidate
+			break
+		}
+	}
+	if muxSig == nil {
+		return false
+	}
+	current := bucket[muxSig.Name]
+	if current == nil {
+		return false
+	}
+	return int(current.Raw) != *sig.MuxSwitch
 }
 
 // SignalEntry 为快照中的一行。
@@ -77,16 +105,22 @@ func (g *Gateway) Snapshot(now time.Time) []SignalEntry {
 	defer g.mu.RUnlock()
 	out := make([]SignalEntry, 0)
 	for id, msg := range g.db.Messages {
+		bucket := g.states[id]
 		for _, sig := range msg.Signals {
 			var st *model.State
-			if bucket := g.states[id]; bucket != nil {
+			if bucket != nil {
 				st = bucket[sig.Name]
 			}
 			entry := SignalEntry{MsgID: id, MsgName: msg.Name, Sig: sig}
 			if st != nil {
 				entry.View.State = *st
 			}
-			entry.View.Status, entry.View.Reason = classify(st, g.timeoutFor(msg.Name, sig.Name), now)
+			if inactiveFor(bucket, msg, sig.Name, st) {
+				entry.View.Status = model.StatusInactive
+				entry.View.Reason = "signal belongs to a multiplex layout that is not currently selected"
+			} else {
+				entry.View.Status, entry.View.Reason = classify(st, g.timeoutFor(msg.Name, sig.Name), now)
+			}
 			out = append(out, entry)
 		}
 	}

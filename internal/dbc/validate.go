@@ -3,6 +3,7 @@ package dbc
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/lechandonga/can-dbc-signal-gateway-go/internal/model"
 )
@@ -73,7 +74,23 @@ func (p *parser) validateMessage(msg *model.Message) {
 			}
 		}
 
-		layouts[layoutKey(sig)] = append(layouts[layoutKey(sig)], sig)
+		for _, key := range overlapKeys(sig) {
+			layouts[key] = append(layouts[key], sig)
+		}
+	}
+	if muxSig := multiplexor(msg); muxSig != nil {
+		effective := map[string][]*model.Signal{}
+		for key, sigs := range layouts {
+			if key != "mux" && key != "common" && strings.HasPrefix(key, "m") {
+				base := make([]*model.Signal, 0, 1+len(msg.Signals))
+				base = append(base, muxSig)
+				base = append(base, staticSignals(msg)...)
+				effective[key] = append(base, sigs...)
+			} else {
+				effective[key] = sigs
+			}
+		}
+		layouts = effective
 	}
 
 	if muxCount == 0 {
@@ -94,11 +111,33 @@ func (p *parser) validateMessage(msg *model.Message) {
 	}
 }
 
-func layoutKey(sig *model.Signal) string {
-	if sig.MuxSwitch != nil {
-		return fmt.Sprintf("m%d", *sig.MuxSwitch)
+func overlapKeys(sig *model.Signal) []string {
+	if sig.IsMuxMultiplexor() {
+		return []string{"mux"}
 	}
-	return "_"
+	if sig.MuxSwitch != nil {
+		return []string{fmt.Sprintf("m%d", *sig.MuxSwitch)}
+	}
+	return []string{"common"}
+}
+
+func multiplexor(msg *model.Message) *model.Signal {
+	for _, sig := range msg.Signals {
+		if sig.IsMuxMultiplexor() {
+			return sig
+		}
+	}
+	return nil
+}
+
+func staticSignals(msg *model.Message) []*model.Signal {
+	var out []*model.Signal
+	for _, sig := range msg.Signals {
+		if !sig.IsMuxMultiplexor() && sig.MuxSwitch == nil {
+			out = append(out, sig)
+		}
+	}
+	return out
 }
 
 func (p *parser) checkOverlap(msg *model.Message, layout string, sigs []*model.Signal) {
