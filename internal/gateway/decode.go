@@ -12,6 +12,11 @@ import (
 func (g *Gateway) HandleFrame(f canbus.Frame) (*Result, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.handleFrameLocked(f)
+}
+
+// handleFrameLocked 为解码主体；调用方必须持有 g.mu 写锁（Inject 复用同一条链路）。
+func (g *Gateway) handleFrameLocked(f canbus.Frame) (*Result, error) {
 
 	g.total++
 	msg := g.db.Messages[f.ID]
@@ -91,6 +96,7 @@ func (g *Gateway) HandleFrame(f canbus.Frame) (*Result, error) {
 	res := &Result{Frame: f, MsgID: msg.ID, MsgName: msg.Name, MuxValue: muxValue}
 	for _, sig := range active {
 		raw := canbus.ExtractRaw(sig, f.Data)
+		label, known := sig.ValueTable.LookupLabel(int64(raw))
 		st := &model.State{
 			MessageID:   msg.ID,
 			MessageName: msg.Name,
@@ -100,6 +106,8 @@ func (g *Gateway) HandleFrame(f canbus.Frame) (*Result, error) {
 			Unit:        sig.Unit,
 			UpdatedAt:   f.Timestamp,
 			ReceivedAt:  f.Timestamp,
+			Label:       label,
+			LabelKnown:  known,
 		}
 		if sig.MuxSwitch != nil {
 			v := *muxValue
@@ -109,6 +117,9 @@ func (g *Gateway) HandleFrame(f canbus.Frame) (*Result, error) {
 		res.Updated = append(res.Updated, *st)
 	}
 	g.lastTS[msg.ID] = f.Timestamp
+	dataCopy := make([]byte, len(f.Data))
+	copy(dataCopy, f.Data)
+	g.lastData[msg.ID] = dataCopy
 	g.ok++
 	return res, nil
 }

@@ -1,0 +1,21 @@
+VERSION "exported by tool B"
+NS_ :
+
+BS_:;
+BU_: GW ENG BODY
+BO_ 100 ENGINE_DATA:8 ENG
+ SG_ EngineSpeed:0|16@1+ (0.25,0)[0,16383.75]"rpm" GW,ENG
+ SG_ EngineTemp :16|8@1- (1,-40)[-40,215]"degC" GW
+ SG_ RequestTorque : 24|16@1- (0.1,0) [-3276.8,3276.7] "Nm" GW
+BO_ 101 BODY_STATUS : 8 BODY
+ SG_ StatusType M :0|4@1+ (1,0)[0,15]"" GW
+ SG_ DoorOpenDeg m0 :8|8@1+ (1,0)[0,180]"deg" GW
+ SG_ GearEngaged m1 :7|4@0+ (1,0)[0,15]"" GW
+ SG_ GearLeverPos m1 :23|8@0+ (1,0)[0,255]"" BODY
+VAL_TABLE_ GEAR_TBL 2 "N"
+ 3 "D" 255 "FAULT" 0 "P" 1 "R";
+VAL_ 101 GearEngaged GEAR_TBL ;
+VAL_ 101 GearLeverPos 1 "ON"
+ 0 "OFF";
+BA_ "GenMsgCycleTime" BO_ 100 10;
+SIG_VALTYPE_ 100 EngineSpeed : 0;

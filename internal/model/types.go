@@ -39,6 +39,9 @@ type Signal struct {
 	MuxSwitch *int // 复用选择值：nil 表示普通信号；MuxIndex==-1 表示复用器
 	MuxIndex  int
 	Receivers []string
+	// ValueTable 为该信号关联的数值表（来自内联 VAL_ 或 VAL_TABLE_ 具名表）；
+	// nil 表示无数值表，查询标签时回退为原始值的十进制表示。
+	ValueTable *ValueTable
 }
 
 // IsMuxMultiplexor 判断该信号是否为多路复用器。
@@ -50,6 +53,7 @@ type Message struct {
 	Name     string
 	DLC      int
 	Sender   string
+	Extended bool // 扩展帧（29 位 ID，DBC 中 BO_ 高位置 1 写法）
 	Signals  []*Signal
 	sigIndex map[string]*Signal
 }
@@ -89,6 +93,25 @@ func (m *Message) ensureIndex() {
 type Database struct {
 	Messages map[uint32]*Message
 	Names    map[string]uint32 // 报文名 -> ID
+	// ValueTables 为文件级具名数值表（VAL_TABLE_），按表名索引。
+	ValueTables map[string]*ValueTable
+}
+
+// ValueTable 为数值表：原始值 -> 语义标签（如 0->"P", 3->"D"）。
+// 解析后的表不可变，可被多个 goroutine 并发只读使用。
+type ValueTable struct {
+	Name   string
+	Labels map[int64]string
+}
+
+// LookupLabel 返回原始值对应的标签；表为 nil 或未收录该值时 ok=false，
+// 由上层按稳定规则回退（原始值的十进制文本）。
+func (t *ValueTable) LookupLabel(raw int64) (string, bool) {
+	if t == nil {
+		return "", false
+	}
+	label, ok := t.Labels[raw]
+	return label, ok
 }
 
 // State 为单个信号的运行时状态快照。
@@ -102,6 +125,8 @@ type State struct {
 	UpdatedAt   time.Time
 	ReceivedAt  time.Time
 	MuxValue    *int // 本次取值时的复用器选择值（普通信号为 nil）
+	Label       string
+	LabelKnown  bool // false 表示信号无数值表或该原始值未收录，回退见 Label 回退规则
 }
 
 // Status 为信号查询结论。
@@ -114,6 +139,9 @@ const (
 	StatusTimeout
 	// StatusNeverReceived 定义已加载但从未收到包含该信号的帧。
 	StatusNeverReceived
+	// StatusMuxInactive 该信号属于当前未选中的复用布局：历史值可能存在，
+	// 但按当前复用器选择值不生效。与"从未收到"和"超时"严格区分。
+	StatusMuxInactive
 )
 
 func (s Status) String() string {
@@ -124,6 +152,8 @@ func (s Status) String() string {
 		return "TIMEOUT"
 	case StatusNeverReceived:
 		return "NEVER_RECEIVED"
+	case StatusMuxInactive:
+		return "MUX_INACTIVE"
 	default:
 		return "UNKNOWN"
 	}

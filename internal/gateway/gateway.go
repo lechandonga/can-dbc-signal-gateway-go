@@ -55,6 +55,7 @@ type Gateway struct {
 	db        *model.Database
 	states    map[uint32]map[string]*model.State
 	lastTS    map[uint32]time.Time
+	lastData  map[uint32][]byte // 每报文最后一次被接受帧的原始字节（注入基帧）
 	total     int64
 	ok        int64
 	rejected  int64
@@ -74,6 +75,7 @@ func New(db *model.Database, cfg Config) *Gateway {
 		db:        db,
 		states:    map[uint32]map[string]*model.State{},
 		lastTS:    map[uint32]time.Time{},
+		lastData:  map[uint32][]byte{},
 		reasonCnt: map[canbus.DecodeReason]int64{},
 	}
 }
@@ -90,6 +92,7 @@ func (g *Gateway) Reload(r io.Reader) error {
 	g.db = newDB
 	g.states = map[uint32]map[string]*model.State{}
 	g.lastTS = map[uint32]time.Time{}
+	g.lastData = map[uint32][]byte{}
 	return nil
 }
 
@@ -100,6 +103,7 @@ func (g *Gateway) ReloadDB(newDB *model.Database) {
 	g.db = newDB
 	g.states = map[uint32]map[string]*model.State{}
 	g.lastTS = map[uint32]time.Time{}
+	g.lastData = map[uint32][]byte{}
 }
 
 // DB 返回当前定义快照（不可变，可安全读取）。
