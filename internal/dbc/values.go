@@ -19,11 +19,18 @@ func tokenizeValuePairs(s string) ([]string, bool) {
 	}
 	for i := 0; i < len(s); i++ {
 		ch := s[i]
+		if inString {
+			cur.WriteByte(ch)
+			if ch == '"' {
+				inString = false
+				flush()
+			}
+			continue
+		}
 		switch {
 		case ch == '"':
-			inString = !inString
-			cur.WriteByte(ch)
-		case inString:
+			flush()
+			inString = true
 			cur.WriteByte(ch)
 		case ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == ',':
 			flush()
@@ -42,16 +49,16 @@ func unquoteDBC(s string) (string, bool) {
 	return s[1 : len(s)-1], true
 }
 
-func parsePairs(tokens []string) (map[uint64]string, bool) {
+func parsePairs(tokens []string) (map[int64]string, bool) {
 	if len(tokens) == 1 {
 		return nil, true
 	}
 	if len(tokens)%2 != 0 {
 		return nil, false
 	}
-	out := map[uint64]string{}
+	out := map[int64]string{}
 	for i := 0; i < len(tokens); i += 2 {
-		raw, err := strconv.ParseUint(tokens[i], 10, 64)
+		raw, err := strconv.ParseInt(tokens[i], 10, 64)
 		if err != nil {
 			return nil, false
 		}
@@ -144,8 +151,8 @@ func (p *parser) resolveValueReferences() {
 	}
 }
 
-func cloneValues(in map[uint64]string) map[uint64]string {
-	out := make(map[uint64]string, len(in))
+func cloneValues(in map[int64]string) map[int64]string {
+	out := make(map[int64]string, len(in))
 	for k, v := range in {
 		out[k] = v
 	}
@@ -157,6 +164,21 @@ func LabelFor(sig *model.Signal, raw uint64) (string, bool) {
 	if sig == nil || sig.ValueLabels == nil {
 		return "", false
 	}
-	label, ok := sig.ValueLabels[raw]
+	key := int64(raw)
+	if sig.IsSigned {
+		key = signedKey(raw, sig.Length)
+	}
+	label, ok := sig.ValueLabels[key]
 	return label, ok
+}
+
+// signedKey 把无符号原始码按指定位宽转成二补码有符号键。
+func signedKey(raw uint64, length int) int64 {
+	if length >= 64 {
+		return int64(raw)
+	}
+	if raw&(uint64(1)<<uint(length-1)) != 0 {
+		return int64(raw) - (int64(1) << uint(length))
+	}
+	return int64(raw)
 }

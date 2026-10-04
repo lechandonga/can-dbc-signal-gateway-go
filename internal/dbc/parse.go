@@ -15,9 +15,9 @@ import (
 )
 
 var (
-	versionRe = regexp.MustCompile(`^VERSION\s+"(.*)"\s*;?\s*$`)
-	boRe      = regexp.MustCompile(`^BO_\s+(\d+)\s+([A-Za-z_][A-Za-z0-9_]*):\s+(\d+)\s+(\S+)\s*$`)
-	sgRe      = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)(?:\s+(M|m\d+M?))?\s*:\s+(\d+)\|(\d+)@([01])([+-])\s+\(([^,]*),([^)]*)\)\s+\[([^,]*),([^\]]*)\]\s+"([^"]*)"(?:\s+(.+))?$`)
+	versionRe = regexp.MustCompile(`^VERSION\s*"(.*)"\s*;?\s*$`)
+	boRe      = regexp.MustCompile(`^BO_\s*(\d+)\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(\d+)(?:\s+(\S+))?\s*$`)
+	sgRe      = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)(?:\s+(M|m\d+M?))?\s*:\s*(\d+)\|(\d+)@([01])([+-])\s*\(([^,]*),([^)]*)\)\s*\[\s*([^,]*),\s*([^\]]*)\]\s*"([^"]*)"(?:[ \t,]*(.+))?$`)
 	muxSimple = regexp.MustCompile(`^m(\d+)$`)
 	muxBoth   = regexp.MustCompile(`^m(\d+)M$`)
 )
@@ -60,7 +60,7 @@ type parser struct {
 	errors      []*DefError
 	current     *model.Message
 	inNS        bool
-	valueTables map[string]map[uint64]string
+	valueTables map[string]map[int64]string
 	pendingVAL  []pendingVAL
 	ignored     map[string]*ignoredGroup
 }
@@ -69,7 +69,7 @@ type pendingVAL struct {
 	line      int
 	msg       *model.Message
 	signal    string
-	entries   map[uint64]string
+	entries   map[int64]string
 	tableName string
 }
 
@@ -84,7 +84,7 @@ func newParser() *parser {
 	return &parser{
 		msgs:        map[uint32]*model.Message{},
 		names:       map[string]uint32{},
-		valueTables: map[string]map[uint64]string{},
+		valueTables: map[string]map[int64]string{},
 		ignored:     map[string]*ignoredGroup{},
 	}
 }
@@ -160,7 +160,7 @@ func needsContinuation(s string) bool {
 		return true
 	}
 	prefixes := []string{
-		"CM_", "BA_", "BA_DEF_", "VAL_ ", "SIG_GROUP_",
+		"CM_", "BA_", "BA_DEF_", "VAL_", "SIG_GROUP_",
 		"SIG_VALTYPE_", "EV_ ", "ENVVAR_DATA_", "BO_TX_BU_", "SGT_REL_",
 		"SIG_TYPE_REF_", "VAL_TABLE_",
 	}
@@ -168,11 +168,37 @@ func needsContinuation(s string) bool {
 		return false // VERSION "..." 不带分号，引号闭合即为完整
 	}
 	for _, pre := range prefixes {
-		if strings.HasPrefix(s, pre) {
+		if hasDBCKeyword(s, pre) {
 			return !strings.HasSuffix(s, ";")
 		}
 	}
 	return false
+}
+
+// hasDBCKeyword 判断 s 是否以 DBC 关键字 kw（带下划线结尾）开头；
+// 关键字后允许空格或直接紧跟参数（如 BO_100: 与 BO_ 100: 等价）。
+func hasDBCKeyword(s, kw string) bool {
+	if !strings.HasPrefix(s, kw) {
+		return false
+	}
+	rest := s[len(kw):]
+	if rest == "" {
+		return true
+	}
+	ch := rest[0]
+	return ch == ' ' || ch == '\t' || ch >= '0' && ch <= '9' || ch == '"' || ch == '_'
+}
+
+// prefixKeyword 返回关键字在 s 中的实际前缀长度（含紧跟的空格）。
+func prefixKeyword(s, kw string) int {
+	if !hasDBCKeyword(s, kw) {
+		return 0
+	}
+	n := len(kw)
+	for n < len(s) && (s[n] == ' ' || s[n] == '\t') {
+		n++
+	}
+	return n
 }
 
 func statementComplete(s string) bool {
@@ -192,34 +218,34 @@ func (p *parser) parseStatement(lineNo int, s string) {
 		if !versionRe.MatchString(versionText) {
 			p.errf(lineNo, ReasonSyntax, `malformed VERSION statement (expect VERSION "...")`)
 		}
-	case s == "NS_ :":
+	case s == "NS_ :" || s == "NS_:":
 		p.inNS = true
 	case strings.HasPrefix(s, "BS_"):
 		t := strings.TrimSpace(s)
-		if t != "BS_:;" && t != "BS_ :" && t != "BS_:" {
+		if t != "BS_:;" && t != "BS_ :" && t != "BS_:" && t != "BS_ ;" {
 			p.errf(lineNo, ReasonSyntax, "malformed BS_ statement")
 		}
 	case strings.HasPrefix(s, "BU_"):
 		body := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(s, "BU_")), ";"))
-		body = strings.TrimPrefix(body, ":")
-		if strings.TrimSpace(body) == "" {
+		body = strings.TrimSpace(strings.TrimPrefix(body, ":"))
+		if strings.TrimSpace(s) != "BU_:" && strings.TrimSpace(s) != "BU_ :;" && body == "" {
 			p.errf(lineNo, ReasonSyntax, "malformed BU_ statement (expect BU_: <nodes>)")
 		}
-	case strings.HasPrefix(s, "BO_ "):
+	case hasDBCKeyword(s, "BO_"):
 		p.parseBO(lineNo, strings.TrimSuffix(s, ";"))
-	case strings.HasPrefix(s, "SG_ "):
+	case hasDBCKeyword(s, "SG_"):
 		if p.current == nil {
 			p.errf(lineNo, ReasonOrphanSignal, "SG_ without preceding BO_")
 			return
 		}
-		p.parseSG(lineNo, strings.TrimSpace(strings.TrimPrefix(s, "SG_")))
+		p.parseSG(lineNo, strings.TrimSpace(s[prefixKeyword(s, "SG_"):]))
 	case strings.HasPrefix(s, "CM_"):
 		p.parseCM(lineNo, strings.TrimSuffix(s, ";"))
-	case strings.HasPrefix(s, "VAL_TABLE_"):
+	case hasDBCKeyword(s, "VAL_TABLE_"):
 		p.parseVALTable(lineNo, strings.TrimSuffix(s, ";"))
-	case strings.HasPrefix(s, "VAL_ "):
+	case hasDBCKeyword(s, "VAL_"):
 		p.parseValueBinding(lineNo, strings.TrimSuffix(s, ";"))
-	case strings.HasPrefix(s, "SIG_VALTYPE_"):
+	case hasDBCKeyword(s, "SIG_VALTYPE_"):
 		p.parseSigValType(lineNo, strings.TrimSuffix(s, ";"))
 	case knownPassThrough(s) != "":
 		p.noteIgnored(lineNo, knownPassThrough(s))
@@ -258,10 +284,18 @@ func (p *parser) parseBO(lineNo int, s string) {
 		p.current = nil
 		return
 	}
-	id, _ := strconv.ParseUint(m[1], 10, 32)
+	rawID, _ := strconv.ParseUint(m[1], 10, 32)
 	dlc, _ := strconv.Atoi(m[3])
-	if id > 0x1FFFFFFF {
-		p.errf(lineNo, ReasonSyntax, "message id %d exceeds 29-bit CAN ID", id)
+	extended := rawID&0x80000000 != 0
+	id := rawID
+	if extended {
+		id &^= 0x80000000
+	}
+	// 无高位标记时按 11 位标准帧校验；带高位标记时为 29 位扩展帧。
+	maxStd := uint64(0x7FF)
+	maxExt := uint64(0x1FFFFFFF)
+	if (!extended && id > maxStd) || (extended && id > maxExt) {
+		p.errf(lineNo, ReasonSyntax, "message id %d exceeds %d-bit CAN ID", id, map[bool]int{false: 11, true: 29}[extended])
 	}
 	if dlc < 1 || dlc > 8 {
 		p.errf(lineNo, ReasonBadLength, "message DLC must be in 1..8, got %d", dlc)
@@ -272,7 +306,7 @@ func (p *parser) parseBO(lineNo int, s string) {
 	if other, dup := p.names[m[2]]; dup {
 		p.errf(lineNo, ReasonDuplicateMessage, "message name %q already used by id %d", m[2], other)
 	}
-	msg := &model.Message{ID: uint32(id), Name: m[2], DLC: dlc, Sender: m[4]}
+	msg := &model.Message{ID: uint32(id), Name: m[2], DLC: dlc, Sender: m[4], Extended: extended}
 	p.msgs[msg.ID] = msg
 	p.names[msg.Name] = msg.ID
 	p.current = msg
@@ -292,9 +326,10 @@ func (p *parser) parseSG(lineNo int, s string) {
 		order = model.Motorola
 	}
 	factor, _ := strconv.ParseFloat(m[7], 64)
-	offset, _ := strconv.ParseFloat(m[8], 64)
-	minV, errMin := strconv.ParseFloat(m[9], 64)
-	maxV, errMax := strconv.ParseFloat(m[10], 64)
+	factor, _ = strconv.ParseFloat(strings.TrimSpace(m[7]), 64)
+	offset, _ := strconv.ParseFloat(strings.TrimSpace(m[8]), 64)
+	minV, errMin := strconv.ParseFloat(strings.TrimSpace(m[9]), 64)
+	maxV, errMax := strconv.ParseFloat(strings.TrimSpace(m[10]), 64)
 	if errMin != nil || errMax != nil {
 		p.sigErr(lineNo, name, ReasonSyntax, "non-numeric min/max")
 		return
@@ -365,6 +400,8 @@ func parseLeadingID(s string) (uint64, string, bool) {
 	if err != nil {
 		return 0, "", false
 	}
+	// 扩展帧 ID 带最高位标记（0x80000000），引用语句同样写法；统一剥离后按 29 位 ID 匹配。
+	id &^= 0x80000000
 	return id, strings.TrimSpace(s[end:]), true
 }
 

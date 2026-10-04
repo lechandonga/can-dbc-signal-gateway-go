@@ -39,7 +39,7 @@ type Signal struct {
 	MuxSwitch   *int // 复用选择值：nil 表示普通信号；MuxIndex==-1 表示复用器
 	MuxIndex    int
 	Receivers   []string
-	ValueLabels map[uint64]string
+	ValueLabels map[int64]string // 有符号信号的负数条目按 int64 存储；解码时原始码经二补码转换后查表
 }
 
 // IsMuxMultiplexor 判断该信号是否为多路复用器。
@@ -51,6 +51,7 @@ type Message struct {
 	Name     string
 	DLC      int
 	Sender   string
+	Extended bool // 扩展帧（29 位 ID）；DBC 中以最高位标记（id |= 0x80000000）写出
 	Signals  []*Signal
 	sigIndex map[string]*Signal
 }
@@ -90,7 +91,7 @@ func (m *Message) ensureIndex() {
 type Database struct {
 	Messages    map[uint32]*Message
 	Names       map[string]uint32 // 报文名 -> ID
-	ValueTables map[string]map[uint64]string
+	ValueTables map[string]map[int64]string
 }
 
 // State 为单个信号的运行时状态快照。
