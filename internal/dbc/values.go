@@ -21,8 +21,15 @@ func tokenizeValuePairs(s string) ([]string, bool) {
 		ch := s[i]
 		switch {
 		case ch == '"':
+			// 数字与引号间无空格（如 0"on"）时，引号本身也是分词边界。
+			if !inString {
+				flush()
+			}
 			inString = !inString
 			cur.WriteByte(ch)
+			if !inString {
+				flush()
+			}
 		case inString:
 			cur.WriteByte(ch)
 		case ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == ',':
@@ -42,7 +49,9 @@ func unquoteDBC(s string) (string, bool) {
 	return s[1 : len(s)-1], true
 }
 
-func parsePairs(tokens []string) (map[uint64]string, bool) {
+// parseTablePairs 解析 VAL_TABLE_ 的键值对。表本身不绑定具体位宽，
+// 有符号条目（如 -1）按二补码原始位模式保存，绑定到信号时再按该信号位宽归一化。
+func parseTablePairs(tokens []string) (map[uint64]string, bool) {
 	if len(tokens) == 1 {
 		return nil, true
 	}
@@ -51,8 +60,8 @@ func parsePairs(tokens []string) (map[uint64]string, bool) {
 	}
 	out := map[uint64]string{}
 	for i := 0; i < len(tokens); i += 2 {
-		raw, err := strconv.ParseUint(tokens[i], 10, 64)
-		if err != nil {
+		raw, ok := parseValueKey(tokens[i])
+		if !ok {
 			return nil, false
 		}
 		label, ok := unquoteDBC(tokens[i+1])
@@ -62,6 +71,49 @@ func parsePairs(tokens []string) (map[uint64]string, bool) {
 		out[raw] = label
 	}
 	return out, true
+}
+
+// parseSignalPairs 解析内联 VAL_ 的键值对；有符号信号接受负数键（按其位宽归一化），
+// 无符号信号出现负数键时返回 (nil,false)，由调用方按语法错误拒绝。
+func parseSignalPairs(tokens []string, signed bool, length int) (map[uint64]string, bool) {
+	if len(tokens) == 1 {
+		return nil, true
+	}
+	if len(tokens)%2 != 0 {
+		return nil, false
+	}
+	out := map[uint64]string{}
+	for i := 0; i < len(tokens); i += 2 {
+		v, err := strconv.ParseInt(tokens[i], 10, 64)
+		if err != nil {
+			return nil, false
+		}
+		if v < 0 && !signed {
+			return nil, false
+		}
+		label, ok := unquoteDBC(tokens[i+1])
+		if !ok {
+			return nil, false
+		}
+		out[normalizeRaw(uint64(v), length)] = label
+	}
+	return out, true
+}
+
+func parseValueKey(s string) (uint64, bool) {
+	if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return uint64(v), true
+	}
+	v, err := strconv.ParseUint(s, 10, 64)
+	return v, err == nil
+}
+
+// normalizeRaw 把键值归一化到信号位宽（-1 在 8 位有符号信号上即 0xFF）。
+func normalizeRaw(raw uint64, length int) uint64 {
+	if length <= 0 || length >= 64 {
+		return raw
+	}
+	return raw & ((uint64(1) << uint(length)) - 1)
 }
 
 func (p *parser) parseVALTable(lineNo int, s string) {
@@ -77,7 +129,7 @@ func (p *parser) parseVALTable(lineNo int, s string) {
 		p.errf(lineNo, ReasonSyntax, "unterminated string in VAL_TABLE_ %s", name)
 		return
 	}
-	values, ok := parsePairs(tokens)
+	values, ok := parseTablePairs(tokens)
 	if !ok {
 		p.errf(lineNo, ReasonSyntax, "malformed value/label pairs in VAL_TABLE_ %s", name)
 		return
@@ -96,7 +148,7 @@ func (p *parser) parseValueBinding(lineNo int, s string) {
 		p.errf(lineNo, ReasonSyntax, "malformed VAL_ statement")
 		return
 	}
-	msg := p.msgs[uint32(idText)]
+	msg := p.msgs[idText]
 	if msg == nil {
 		p.errf(lineNo, ReasonDanglingReference, "VAL_ references unknown message id %d", idText)
 		return
@@ -112,7 +164,7 @@ func (p *parser) parseValueBinding(lineNo int, s string) {
 		p.sigErrIn(msg, lineNo, signalName, ReasonDanglingReference, "VAL_ references unknown signal in message %d", idText)
 		return
 	}
-	values, ok := parsePairs(tokens[1:])
+	values, ok := parseSignalPairs(tokens[1:], sig.IsSigned, sig.Length)
 	if !ok {
 		p.sigErrIn(msg, lineNo, signalName, ReasonSyntax, "malformed VAL_ value/label pairs")
 		return
@@ -124,7 +176,6 @@ func (p *parser) parseValueBinding(lineNo int, s string) {
 		pending.entries = values
 	}
 	p.pendingVAL = append(p.pendingVAL, pending)
-	_ = sig
 }
 
 func (p *parser) resolveValueReferences() {
@@ -138,10 +189,18 @@ func (p *parser) resolveValueReferences() {
 					"VAL_ references unknown value table %q", pending.tableName)
 				continue
 			}
-			values = cloneValues(ref)
+			values = normalizeTable(ref, sig.Length)
 		}
 		sig.ValueLabels = cloneValues(values)
 	}
+}
+
+func normalizeTable(in map[uint64]string, length int) map[uint64]string {
+	out := make(map[uint64]string, len(in))
+	for k, v := range in {
+		out[normalizeRaw(k, length)] = v
+	}
+	return out
 }
 
 func cloneValues(in map[uint64]string) map[uint64]string {

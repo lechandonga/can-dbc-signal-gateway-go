@@ -142,13 +142,20 @@ func TestInjectRejectionClassesAndNoHalfState(t *testing.T) {
 		asInjectReason(t, err) != canbus.ReasonValueOutOfRange {
 		t.Fatalf("range reason mismatch: %v", err)
 	}
-	if _, err := gw.Inject(Injection{MessageID: 257, Timestamp: t0, Values: map[string]float64{"Gear": 1}}); err == nil ||
-		asInjectReason(t, err) != canbus.ReasonMuxSelectorInvalid {
-		t.Fatalf("missing selector reason mismatch: %v", err)
-	}
+	// 选择值明确非法（超出选择器位宽或非整数）-> MUX_SELECTOR_INVALID。
 	if _, err := gw.Inject(Injection{MessageID: 257, Timestamp: t0, Values: map[string]float64{"Sel": 9, "Gear": 1}}); err == nil ||
 		asInjectReason(t, err) != canbus.ReasonMuxSelectorInvalid {
 		t.Fatalf("illegal selector reason mismatch: %v", err)
+	}
+	if _, err := gw.Inject(Injection{MessageID: 257, Timestamp: t0, Values: map[string]float64{"Sel": 1.5}}); err == nil ||
+		asInjectReason(t, err) != canbus.ReasonMuxSelectorInvalid {
+		t.Fatalf("non-integer selector reason mismatch: %v", err)
+	}
+	// 未给出选择值且从未收到帧时按默认选择值 0；目标在布局 1 -> MUX_LAYOUT_MISMATCH，
+	// 与选择值非法、无布局两类失败仍各自可区分。
+	if _, err := gw.Inject(Injection{MessageID: 257, Timestamp: t0, Values: map[string]float64{"Gear": 1}}); err == nil ||
+		asInjectReason(t, err) != canbus.ReasonMuxLayoutMismatch {
+		t.Fatalf("default-selector layout mismatch reason mismatch: %v", err)
 	}
 	if _, err := gw.Inject(Injection{MessageID: 257, Timestamp: t0, Values: map[string]float64{"Sel": 0, "Gear": 1}}); err == nil ||
 		asInjectReason(t, err) != canbus.ReasonMuxLayoutMismatch {

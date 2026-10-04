@@ -12,6 +12,7 @@ type ImportSummary struct {
 // MessageSummary 为被采用报文及其信号摘要。
 type MessageSummary struct {
 	ID          uint32
+	Extended    bool
 	Name        string
 	DLC         int
 	SignalNames []string
@@ -40,7 +41,7 @@ func (p *parser) summary() *ImportSummary {
 			names = append(names, sig.Name)
 		}
 		sum.AdoptedMessages = append(sum.AdoptedMessages, MessageSummary{
-			ID: id, Name: msg.Name, DLC: msg.DLC, SignalNames: names,
+			ID: id, Extended: msg.Extended, Name: msg.Name, DLC: msg.DLC, SignalNames: names,
 		})
 	}
 	kinds := make([]string, 0, len(p.ignored))

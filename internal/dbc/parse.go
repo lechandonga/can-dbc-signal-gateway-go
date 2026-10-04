@@ -15,12 +15,30 @@ import (
 )
 
 var (
-	versionRe = regexp.MustCompile(`^VERSION\s+"(.*)"\s*;?\s*$`)
-	boRe      = regexp.MustCompile(`^BO_\s+(\d+)\s+([A-Za-z_][A-Za-z0-9_]*):\s+(\d+)\s+(\S+)\s*$`)
-	sgRe      = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)(?:\s+(M|m\d+M?))?\s*:\s+(\d+)\|(\d+)@([01])([+-])\s+\(([^,]*),([^)]*)\)\s+\[([^,]*),([^\]]*)\]\s+"([^"]*)"(?:\s+(.+))?$`)
+	versionRe = regexp.MustCompile(`^VERSION\s*"(.*)"\s*;?\s*$`)
+	boRe      = regexp.MustCompile(`^BO_\s+(\d+)\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(\d+)\s+(\S+)\s*;?\s*$`)
+	sgRe      = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)(?:\s+(M|m\d+M?))?\s*:\s*(\d+)\|(\d+)@([01])([+-])\s*\(\s*([^,]*?)\s*,\s*([^)]*?)\s*\)\s*\[\s*([^,]*?)\s*,\s*([^\]]*?)\s*\]\s*"([^"]*)"\s*(?:\s+(.+?))?\s*;?\s*$`)
 	muxSimple = regexp.MustCompile(`^m(\d+)$`)
 	muxBoth   = regexp.MustCompile(`^m(\d+)M$`)
+	nsRe      = regexp.MustCompile(`^NS_\s*:\s*;?\s*$`)
+	bsRe      = regexp.MustCompile(`^BS_\s*:\s*;?\s*$`)
 )
+
+// canonicalDBCID 规范化 DBC 报文 ID：带 bit31 高位标记的为扩展帧，
+// 去掉标记位并按 29 位扩展 ID 校验。
+func canonicalDBCID(raw uint64) (uint32, bool, bool) {
+	if raw < 1<<31 {
+		if raw > 0x7FF {
+			return uint32(raw), true, true
+		}
+		return uint32(raw), false, true
+	}
+	id := raw - 1<<31
+	if id > 0x1FFFFFFF {
+		return 0, false, false
+	}
+	return uint32(id), true, true
+}
 
 // ParseDetailed 解析 DBC 并返回定义与导入摘要。
 func ParseDetailed(r io.Reader) (*model.Database, *ImportSummary, error) {
@@ -130,10 +148,12 @@ func (p *parser) parseLines(lines []string) {
 		i++
 
 		if p.inNS {
-			if trimmed == "" {
+			// NS_ 块按惯例以空行结束；紧凑导出没有空行时，遇到下一条已知语句也结束。
+			if trimmed == "" || isKnownStatementStart(trimmed) {
 				p.inNS = false
+			} else {
+				continue
 			}
-			continue
 		}
 		if trimmed == "" || strings.HasPrefix(trimmed, "//") {
 			continue
@@ -179,6 +199,21 @@ func statementComplete(s string) bool {
 	return strings.Count(s, `"`)%2 == 0 && strings.HasSuffix(strings.TrimSpace(s), ";")
 }
 
+// isKnownStatementStart 判断一行是否以 NS_ 块之后的已知顶级语句开头，
+// 用于没有空行分隔的紧凑 NS_ 块提前结束。
+func isKnownStatementStart(s string) bool {
+	for _, pre := range []string{
+		"VERSION", "BS_", "BU_", "BO_ ", "SG_ ", "CM_", "VAL_TABLE_", "VAL_ ",
+		"SIG_VALTYPE_", "SIG_GROUP_", "BA_", "BA_DEF_", "BA_DEF_DEF_", "BO_TX_BU_",
+		"EV_ ", "ENVVAR_DATA_", "SGTYPE_", "NS_DESC_",
+	} {
+		if strings.HasPrefix(s, pre) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *parser) parseStatement(lineNo int, s string) {
 	switch {
 	case strings.HasPrefix(s, "VERSION"):
@@ -192,19 +227,8 @@ func (p *parser) parseStatement(lineNo int, s string) {
 		if !versionRe.MatchString(versionText) {
 			p.errf(lineNo, ReasonSyntax, `malformed VERSION statement (expect VERSION "...")`)
 		}
-	case s == "NS_ :":
+	case nsRe.MatchString(s):
 		p.inNS = true
-	case strings.HasPrefix(s, "BS_"):
-		t := strings.TrimSpace(s)
-		if t != "BS_:;" && t != "BS_ :" && t != "BS_:" {
-			p.errf(lineNo, ReasonSyntax, "malformed BS_ statement")
-		}
-	case strings.HasPrefix(s, "BU_"):
-		body := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(s, "BU_")), ";"))
-		body = strings.TrimPrefix(body, ":")
-		if strings.TrimSpace(body) == "" {
-			p.errf(lineNo, ReasonSyntax, "malformed BU_ statement (expect BU_: <nodes>)")
-		}
 	case strings.HasPrefix(s, "BO_ "):
 		p.parseBO(lineNo, strings.TrimSuffix(s, ";"))
 	case strings.HasPrefix(s, "SG_ "):
@@ -213,11 +237,26 @@ func (p *parser) parseStatement(lineNo int, s string) {
 			return
 		}
 		p.parseSG(lineNo, strings.TrimSpace(strings.TrimPrefix(s, "SG_")))
+	case strings.HasPrefix(s, "BS_"):
+		t := strings.TrimSpace(s)
+		if !bsRe.MatchString(t) {
+			p.errf(lineNo, ReasonSyntax, "malformed BS_ statement")
+		}
+	case strings.HasPrefix(s, "BU_"):
+		body := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(s, "BU_")), ";"))
+		body = strings.TrimSpace(strings.TrimPrefix(body, ":"))
+		if !strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(s, "BU_")), ":") {
+			p.errf(lineNo, ReasonSyntax, "malformed BU_ statement (expect BU_: <nodes>)")
+			return
+		}
+		if strings.TrimSpace(body) == "" {
+			// 空节点列表的 BU_: 仅作为文件头语法接受（部分导出工具如此生成）。
+		}
 	case strings.HasPrefix(s, "CM_"):
 		p.parseCM(lineNo, strings.TrimSuffix(s, ";"))
 	case strings.HasPrefix(s, "VAL_TABLE_"):
 		p.parseVALTable(lineNo, strings.TrimSuffix(s, ";"))
-	case strings.HasPrefix(s, "VAL_ "):
+	case strings.HasPrefix(s, "VAL_"):
 		p.parseValueBinding(lineNo, strings.TrimSuffix(s, ";"))
 	case strings.HasPrefix(s, "SIG_VALTYPE_"):
 		p.parseSigValType(lineNo, strings.TrimSuffix(s, ";"))
@@ -258,21 +297,23 @@ func (p *parser) parseBO(lineNo int, s string) {
 		p.current = nil
 		return
 	}
-	id, _ := strconv.ParseUint(m[1], 10, 32)
-	dlc, _ := strconv.Atoi(m[3])
-	if id > 0x1FFFFFFF {
-		p.errf(lineNo, ReasonSyntax, "message id %d exceeds 29-bit CAN ID", id)
+	rawID, _ := strconv.ParseUint(m[1], 10, 64)
+	id, extended, ok := canonicalDBCID(rawID)
+	if !ok {
+		p.errf(lineNo, ReasonSyntax, "message id %d exceeds 29-bit extended CAN ID", rawID)
+		return
 	}
+	dlc, _ := strconv.Atoi(m[3])
 	if dlc < 1 || dlc > 8 {
 		p.errf(lineNo, ReasonBadLength, "message DLC must be in 1..8, got %d", dlc)
 	}
-	if _, dup := p.msgs[uint32(id)]; dup {
+	if _, dup := p.msgs[id]; dup {
 		p.errf(lineNo, ReasonDuplicateMessage, "duplicate message id %d", id)
 	}
 	if other, dup := p.names[m[2]]; dup {
 		p.errf(lineNo, ReasonDuplicateMessage, "message name %q already used by id %d", m[2], other)
 	}
-	msg := &model.Message{ID: uint32(id), Name: m[2], DLC: dlc, Sender: m[4]}
+	msg := &model.Message{ID: id, Name: m[2], DLC: dlc, Sender: m[4], Extended: extended}
 	p.msgs[msg.ID] = msg
 	p.names[msg.Name] = msg.ID
 	p.current = msg
@@ -355,14 +396,18 @@ func splitReceivers(s string) []string {
 	return out
 }
 
-func parseLeadingID(s string) (uint64, string, bool) {
+func parseLeadingID(s string) (uint32, string, bool) {
 	s = strings.TrimSpace(s)
 	end := strings.IndexAny(s, " ,\t")
 	if end < 0 {
 		end = len(s)
 	}
-	id, err := strconv.ParseUint(s[:end], 10, 32)
+	raw, err := strconv.ParseUint(s[:end], 10, 64)
 	if err != nil {
+		return 0, "", false
+	}
+	id, _, ok := canonicalDBCID(raw)
+	if !ok {
 		return 0, "", false
 	}
 	return id, strings.TrimSpace(s[end:]), true
@@ -375,7 +420,7 @@ func (p *parser) parseCM(lineNo int, s string) {
 	case strings.HasPrefix(body, "BO_"):
 		rest := strings.TrimSpace(strings.TrimPrefix(body, "BO_"))
 		id, _, ok := parseLeadingID(rest)
-		if !ok || p.msgs[uint32(id)] == nil {
+		if !ok || p.msgs[id] == nil {
 			p.errf(lineNo, ReasonDanglingReference, "CM_ BO_ references unknown message: %q", truncate(rest, 40))
 		}
 	case strings.HasPrefix(body, "SG_"):
@@ -390,7 +435,7 @@ func (p *parser) parseCM(lineNo int, s string) {
 			p.errf(lineNo, ReasonSyntax, "malformed CM_ SG_: missing signal name")
 			return
 		}
-		msg := p.msgs[uint32(id)]
+		msg := p.msgs[id]
 		if msg == nil {
 			p.errf(lineNo, ReasonDanglingReference, "CM_ SG_ references unknown message id %d", id)
 			return
@@ -418,7 +463,7 @@ func (p *parser) parseVAL(lineNo int, s string) {
 		p.errf(lineNo, ReasonSyntax, "malformed VAL_ statement: need signal name and at least one value/label pair")
 		return
 	}
-	msg := p.msgs[uint32(id)]
+	msg := p.msgs[id]
 	if msg == nil {
 		p.errf(lineNo, ReasonDanglingReference, "VAL_ references unknown message id %d", id)
 		return
@@ -447,12 +492,13 @@ func (p *parser) parseSigValType(lineNo int, s string) {
 		p.errf(lineNo, ReasonSyntax, "malformed SIG_VALTYPE_ type")
 		return
 	}
-	id, convErr := strconv.ParseUint(left[0], 10, 32)
-	if convErr != nil {
+	rawID, convErr := strconv.ParseUint(left[0], 10, 64)
+	id, _, convOK := canonicalDBCID(rawID)
+	if convErr != nil || !convOK {
 		p.errf(lineNo, ReasonSyntax, "malformed SIG_VALTYPE_: bad message id")
 		return
 	}
-	msg := p.msgs[uint32(id)]
+	msg := p.msgs[id]
 	if msg == nil {
 		p.errf(lineNo, ReasonDanglingReference, "SIG_VALTYPE_ references unknown message id %d", id)
 		return

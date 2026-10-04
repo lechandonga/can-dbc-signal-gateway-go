@@ -84,7 +84,9 @@ func Physical(sig *model.Signal, raw uint64) float64 {
 }
 
 // EncodeRaw 是 ExtractRaw 的逆操作，供本地帧序列构造使用。
+// 写入前先清掉该信号自身占用的位，保证同一信号连续写入是完整覆盖而不是按位 OR。
 func EncodeRaw(sig *model.Signal, raw uint64, data []byte) {
+	clearSignalBits(sig, data)
 	switch sig.Order {
 	case model.Intel:
 		for i := 0; i < sig.Length; i++ {
@@ -107,6 +109,19 @@ func EncodeRaw(sig *model.Signal, raw uint64, data []byte) {
 			if raw&(1<<uint(sig.Length-1-i)) != 0 {
 				data[linear/8] |= 1 << uint(linear%8)
 			}
+		}
+	}
+}
+
+// clearSignalBits 清零信号自身占用的全部位。
+func clearSignalBits(sig *model.Signal, data []byte) {
+	positions, ok := SignalBitPositions(sig)
+	if !ok {
+		return
+	}
+	for _, bit := range positions {
+		if bit/8 < len(data) {
+			data[bit/8] &^= 1 << uint(bit%8)
 		}
 	}
 }

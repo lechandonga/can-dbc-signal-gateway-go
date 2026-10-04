@@ -37,6 +37,13 @@ func (g *Gateway) buildFrameLocked(id uint32, values map[string]float64, ts time
 		return nil, &canbus.InjectError{Reason: canbus.ReasonInjectUnknownMessage, BusName: g.name, MsgID: id,
 			Detail: "message id not present in loaded definitions"}
 	}
+
+	// 时间戳规则与 HandleFrame 一致：先校验，任何失败都不产生半成品。
+	if last, ok := g.lastTS[id]; ok && ts.Before(last) {
+		return nil, &canbus.InjectError{Reason: canbus.ReasonInjectTimestampRewound, BusName: g.name, MsgID: id,
+			MsgName: msg.Name, Detail: fmt.Sprintf("timestamp %s is earlier than last accepted %s", ts, last)}
+	}
+
 	targets := map[string]*model.Signal{}
 	for name := range values {
 		sig, ok := msg.SignalByName(name)
@@ -57,12 +64,25 @@ func (g *Gateway) buildFrameLocked(id uint32, values map[string]float64, ts time
 
 	muxValue := 0
 	if muxSig != nil {
-		rawSel, ok, injectErr := selectorValue(g.name, msg, muxSig, values)
-		if injectErr != nil {
-			return nil, injectErr
+		if explicit, given := values[muxSig.Name]; given {
+			// 选择值被明确给出：必须是整数，且同时落在 DBC 声明范围与选择器位宽内。
+			outOfDeclared := explicit < muxSig.Min || explicit > muxSig.Max
+			outOfBits := uint64(explicit) > selectorMask(muxSig.Length)
+			if math.Mod(explicit, 1) != 0 || explicit < 0 || int64(explicit) < 0 ||
+				outOfDeclared || outOfBits {
+				return nil, &canbus.InjectError{Reason: canbus.ReasonMuxSelectorInvalid, BusName: g.name, MsgID: id,
+					MsgName: msg.Name, Signal: muxSig.Name,
+					Detail: fmt.Sprintf("selector value %v is not an integer within declared [%g,%g] and %d-bit range [0,%d]",
+						explicit, muxSig.Min, muxSig.Max, muxSig.Length, selectorMask(muxSig.Length))}
+			}
+			muxValue = int(explicit)
+		} else if previous := g.lastData[id]; previous != nil {
+			// 未给出选择值但收到过帧：沿用上一帧被接受时的选择器原始位。
+			muxValue = int(canbus.ExtractRaw(muxSig, previous))
+		} else {
+			// 未给出选择值且从未收到帧：按既有默认值规则，选择器原始位为 0。
+			muxValue = 0
 		}
-		muxValue = rawSel
-		_ = ok
 		layoutCount := 0
 		for _, sig := range msg.Signals {
 			if sig.MuxSwitch != nil && *sig.MuxSwitch == muxValue {
@@ -75,17 +95,12 @@ func (g *Gateway) buildFrameLocked(id uint32, values map[string]float64, ts time
 				Detail: fmt.Sprintf("selector value %d has no writable signal layout", muxValue)}
 		}
 		for name, sig := range targets {
-			if sig.MuxSwitch != nil && *sig.MuxSwitch != muxValue {
+			if !sig.IsMuxMultiplexor() && sig.MuxSwitch != nil && *sig.MuxSwitch != muxValue {
 				return nil, &canbus.InjectError{Reason: canbus.ReasonMuxLayoutMismatch, BusName: g.name, MsgID: id,
 					MsgName: msg.Name, Signal: name,
 					Detail: fmt.Sprintf("signal belongs to layout %d, selector is %d", *sig.MuxSwitch, muxValue)}
 			}
 		}
-	}
-
-	if last, ok := g.lastTS[id]; ok && ts.Before(last) {
-		return nil, &canbus.InjectError{Reason: canbus.ReasonInjectTimestampRewound, BusName: g.name, MsgID: id,
-			MsgName: msg.Name, Detail: fmt.Sprintf("timestamp %s is earlier than last accepted %s", ts, last)}
 	}
 
 	for name, sig := range targets {
@@ -99,47 +114,18 @@ func (g *Gateway) buildFrameLocked(id uint32, values map[string]float64, ts time
 	if previous := g.lastData[id]; previous != nil {
 		copy(data, previous)
 	}
+	// 只覆盖本次明确给出的信号；其它信号位完整保持上一帧（无历史帧时保持全 0 默认值）。
 	for name, sig := range targets {
 		canbus.EncodePhysical(sig, values[name], data)
-	}
-	if muxSig != nil {
-		clearBits(muxSig, data)
-		for _, sig := range msg.Signals {
-			if sig.MuxSwitch != nil {
-				clearBits(sig, data)
-			}
-		}
-		for name, sig := range targets {
-			if sig.MuxSwitch != nil || sig.IsMuxMultiplexor() {
-				canbus.EncodePhysical(sig, values[name], data)
-			}
-		}
 	}
 	return data, nil
 }
 
-func clearBits(sig *model.Signal, data []byte) {
-	bits, ok := canbus.SignalBitPositions(sig)
-	if !ok {
-		return
+func selectorMask(length int) uint64 {
+	if length >= 64 {
+		return ^uint64(0)
 	}
-	for _, bit := range bits {
-		data[bit/8] &^= 1 << uint(bit%8)
-	}
-}
-
-func selectorValue(busName string, msg *model.Message, muxSig *model.Signal, values map[string]float64) (int, bool, *canbus.InjectError) {
-	value, ok := values[muxSig.Name]
-	if !ok {
-		return 0, false, &canbus.InjectError{Reason: canbus.ReasonMuxSelectorInvalid, BusName: busName, MsgID: msg.ID,
-			MsgName: msg.Name, Signal: muxSig.Name, Detail: "multiplexor selector value is required"}
-	}
-	if math.Mod(value, 1) != 0 || value < 0 || value < float64(muxSig.Min) || value > float64(muxSig.Max) {
-		return 0, false, &canbus.InjectError{Reason: canbus.ReasonMuxSelectorInvalid, BusName: busName, MsgID: msg.ID,
-			MsgName: msg.Name, Signal: muxSig.Name,
-			Detail: fmt.Sprintf("selector physical value %v is not an integer in [%g,%g]", value, muxSig.Min, muxSig.Max)}
-	}
-	return int(value), true, nil
+	return uint64(1)<<uint(length) - 1
 }
 
 func validatePhysical(sig *model.Signal, value float64) string {

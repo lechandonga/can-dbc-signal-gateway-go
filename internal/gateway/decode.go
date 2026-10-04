@@ -63,7 +63,12 @@ func (g *Gateway) handleFrameLocked(f canbus.Frame) (*Result, error) {
 	}
 	active := make([]*model.Signal, 0, len(msg.Signals))
 	if muxSig != nil {
-		active = append(active, muxSig)
+		// 复用器与报文上的普通（非分支）信号在任何选择值下都随帧更新。
+		for _, sig := range msg.Signals {
+			if sig.IsMuxMultiplexor() || sig.MuxSwitch == nil {
+				active = append(active, sig)
+			}
+		}
 		hit := false
 		for _, sig := range msg.Signals {
 			if sig.MuxSwitch != nil && *sig.MuxSwitch == *muxValue {

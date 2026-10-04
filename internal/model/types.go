@@ -51,6 +51,7 @@ type Message struct {
 	Name     string
 	DLC      int
 	Sender   string
+	Extended bool // DBC 中以高位标记（>=2^31）声明的扩展帧；存储的 ID 已去掉标记位
 	Signals  []*Signal
 	sigIndex map[string]*Signal
 }
